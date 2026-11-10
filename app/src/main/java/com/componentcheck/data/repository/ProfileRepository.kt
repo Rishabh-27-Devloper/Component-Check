@@ -240,6 +240,9 @@ class ProfileRepository(
 
         // Check Bio (ignore if prev was placeholder boilerplate)
         val prevBioIsBoilerplate = prev.bio.contains("See Instagram photos and videos", ignoreCase = true) ||
+                prev.bio.contains("Follow to see their photos and videos", ignoreCase = true) ||
+                prev.bio.contains("Follow this account to see", ignoreCase = true) ||
+                prev.bio.contains("This account is private", ignoreCase = true) ||
                 prev.bio.startsWith("Monitoring active for") ||
                 prev.bio.contains("Followers, ") ||
                 prev.bio.isBlank()

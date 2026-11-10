@@ -156,13 +156,17 @@ class HeadlessWebViewScraper(private val context: Context) {
                     window.ScraperBridge.postResult(JSON.stringify(payload));
                 }
 
-                // 1. FAST PATH: Authenticated Same-Origin in-page API fetch
+                // 1. FAST PATH: Authenticated in-page API request
                 try {
+                    let csrf = '';
+                    let match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+                    if (match) csrf = match[1];
+
                     let resp = await fetch('https://www.instagram.com/api/v1/users/web_profile_info/?username=' + cleanHandle, {
                         method: 'GET',
                         headers: {
                             'x-ig-app-id': '936619743392459',
-                            'x-asbd-id': '129477',
+                            'x-csrftoken': csrf,
                             'x-requested-with': 'XMLHttpRequest'
                         },
                         credentials: 'include'
@@ -179,9 +183,7 @@ class HeadlessWebViewScraper(private val context: Context) {
                             return;
                         }
                     }
-                } catch (e) {
-                    // Continue to DOM parsing
-                }
+                } catch (e) {}
 
                 function extractScriptData(targetHandle) {
                     let scriptBio = '';
@@ -240,72 +242,156 @@ class HeadlessWebViewScraper(private val context: Context) {
                     return { scriptBio, scriptFullName, scriptFollowers, scriptFollowing, scriptPosts, scriptPic };
                 }
 
-                function extractStat(type) {
-                    // 1. Direct anchor matching on entire document
-                    let anchor = document.querySelector('a[href*="/' + type + '/"], a[href$="/' + type + '"], a[href*="/' + type + '"]');
+                // Dedicated extraction functions per metric to avoid cross-contamination
+                function extractFollowers() {
+                    let container = document.querySelector('main') || document.body;
+
+                    // 1. Anchor tag with /followers
+                    let anchor = document.querySelector('a[href*="/followers/"], a[href$="/followers"], a[href*="/followers"]');
                     if (anchor) {
                         let span = anchor.querySelector('span[title]');
                         if (span && span.getAttribute('title')) {
                             let t = span.getAttribute('title').trim();
                             if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
                         }
-                        let txt = (anchor.innerText || '').trim();
-                        let m = txt.match(/([0-9,\\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) ||
-                                txt.match(/(?:followers?|following|posts?)\s*([0-9,\\.]+[KkMmBb]?)/i) ||
-                                txt.match(/^([0-9,\\.]+[KkMmBb]?)${'$'}/);
+                        let m = anchor.innerText.match(/([0-9,\\.]+[KkMmBb]?)\s*followers?/i) ||
+                                anchor.innerText.match(/followers?\s*([0-9,\\.]+[KkMmBb]?)/i) ||
+                                anchor.innerText.match(/^([0-9,\\.]+[KkMmBb]?)${'$'}/);
                         if (m) return m[1];
                     }
 
-                    // 2. Search container elements in main or body
-                    let container = document.querySelector('main') || document.body;
-                    if (container) {
-                        let elements = Array.from(container.querySelectorAll('li, a, div, span, button'))
-                            .filter(el => {
-                                if (el.children.length > 3) return false;
-                                let txt = (el.innerText || '').trim();
-                                if (!txt) return false;
-                                let re = new RegExp('\\b' + type + '\\b', 'i');
-                                return re.test(txt) && !/edit profile|share profile|message|contact/i.test(txt);
-                            });
+                    // 2. Leaf element specifically matching followers
+                    let elements = Array.from(container.querySelectorAll('li, div, a, span'))
+                        .filter(el => {
+                            if (el.closest('button') || el.getAttribute('role') === 'button') return false;
+                            if (el.children.length > 2) return false;
+                            let txt = (el.innerText || '').trim();
+                            if (!txt || txt.length > 35) return false;
+                            if (!/\bfollowers?\b/i.test(txt)) return false;
+                            if (/\bfollowing\b/i.test(txt)) return false; // Strictly exclude following!
+                            return true;
+                        });
 
-                        for (let el of elements) {
-                            let span = el.querySelector('span[title]');
-                            if (span && span.getAttribute('title')) {
-                                let t = span.getAttribute('title').trim();
-                                if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
-                            }
-                            let m = el.innerText.match(/([0-9,\\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) ||
-                                    el.innerText.match(/(?:followers?|following|posts?)\s*([0-9,\\.]+[KkMmBb]?)/i);
-                            if (m) return m[1];
-
-                            if (el.previousElementSibling) {
-                                let prev = (el.previousElementSibling.innerText || '').trim();
-                                if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(prev)) return prev;
-                            }
-                            if (el.nextElementSibling) {
-                                let next = (el.nextElementSibling.innerText || '').trim();
-                                if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(next)) return next;
-                            }
+                    for (let el of elements) {
+                        let span = el.querySelector('span[title]');
+                        if (span && span.getAttribute('title')) {
+                            let t = span.getAttribute('title').trim();
+                            if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
                         }
-
-                        // 3. Multi-line search
-                        let lines = (container.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
-                        for (let i = 0; i < lines.length; i++) {
-                            let l = lines[i].toLowerCase();
-                            if (l === type || l === type + 's' || (type === 'followers' && l === 'follower')) {
-                                if (i > 0 && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i - 1])) {
-                                    return lines[i - 1];
-                                }
-                                if (i + 1 < lines.length && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i + 1])) {
-                                    return lines[i + 1];
-                                }
-                            }
-                            let m = lines[i].match(new RegExp('([0-9,\\.]+[KkMmBb]?)\\s+' + type, 'i')) ||
-                                    lines[i].match(new RegExp(type + '\\s+([0-9,\\.]+[KkMmBb]?)', 'i'));
-                            if (m) return m[1];
-                        }
+                        let m = el.innerText.match(/([0-9,\\.]+[KkMmBb]?)\s*followers?/i) ||
+                                el.innerText.match(/followers?\s*([0-9,\\.]+[KkMmBb]?)/i);
+                        if (m) return m[1];
                     }
 
+                    // 3. Multi-line search
+                    let lines = (container.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+                    for (let i = 0; i < lines.length; i++) {
+                        let l = lines[i].toLowerCase();
+                        if (l === 'followers' || l === 'follower') {
+                            if (i > 0 && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i - 1])) return lines[i - 1];
+                            if (i + 1 < lines.length && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i + 1])) return lines[i + 1];
+                        }
+                        let m = lines[i].match(/([0-9,\\.]+[KkMmBb]?)\s+followers?/i) ||
+                                lines[i].match(/followers?\s+([0-9,\\.]+[KkMmBb]?)/i);
+                        if (m) return m[1];
+                    }
+                    return '';
+                }
+
+                function extractFollowing() {
+                    let container = document.querySelector('main') || document.body;
+
+                    // 1. Anchor tag with /following
+                    let anchor = document.querySelector('a[href*="/following/"], a[href$="/following"], a[href*="/following"]');
+                    if (anchor) {
+                        let span = anchor.querySelector('span[title]');
+                        if (span && span.getAttribute('title')) {
+                            let t = span.getAttribute('title').trim();
+                            if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
+                        }
+                        let m = anchor.innerText.match(/([0-9,\\.]+[KkMmBb]?)\s*following/i) ||
+                                anchor.innerText.match(/following\s*([0-9,\\.]+[KkMmBb]?)/i) ||
+                                anchor.innerText.match(/^([0-9,\\.]+[KkMmBb]?)${'$'}/);
+                        if (m) return m[1];
+                    }
+
+                    // 2. Leaf element specifically matching following (strictly excluding buttons!)
+                    let elements = Array.from(container.querySelectorAll('li, div, a, span'))
+                        .filter(el => {
+                            if (el.closest('button') || el.getAttribute('role') === 'button' || el.closest('[role="button"]')) return false;
+                            if (el.children.length > 2) return false;
+                            let txt = (el.innerText || '').trim();
+                            if (!txt || txt.length > 35) return false;
+                            if (!/\bfollowing\b/i.test(txt)) return false;
+                            if (/\bfollowers?\b/i.test(txt)) return false; // Strictly exclude followers!
+                            return true;
+                        });
+
+                    for (let el of elements) {
+                        let span = el.querySelector('span[title]');
+                        if (span && span.getAttribute('title')) {
+                            let t = span.getAttribute('title').trim();
+                            if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
+                        }
+                        let m = el.innerText.match(/([0-9,\\.]+[KkMmBb]?)\s*following/i) ||
+                                el.innerText.match(/following\s*([0-9,\\.]+[KkMmBb]?)/i);
+                        if (m) return m[1];
+                    }
+
+                    // 3. Multi-line search
+                    let lines = (container.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+                    for (let i = 0; i < lines.length; i++) {
+                        let l = lines[i].toLowerCase();
+                        if (l === 'following') {
+                            if (i > 0 && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i - 1])) return lines[i - 1];
+                            if (i + 1 < lines.length && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i + 1])) return lines[i + 1];
+                        }
+                        let m = lines[i].match(/([0-9,\\.]+[KkMmBb]?)\s+following/i) ||
+                                lines[i].match(/following\s+([0-9,\\.]+[KkMmBb]?)/i);
+                        if (m) return m[1];
+                    }
+                    return '';
+                }
+
+                function extractPosts() {
+                    let container = document.querySelector('main') || document.body;
+
+                    // Leaf element specifically matching posts (excluding tab bars and nav)
+                    let elements = Array.from(container.querySelectorAll('li, div, a, span'))
+                        .filter(el => {
+                            if (el.closest('nav') || el.getAttribute('role') === 'tab') return false;
+                            if (el.closest('button') || el.getAttribute('role') === 'button') return false;
+                            if (el.children.length > 2) return false;
+                            let txt = (el.innerText || '').trim();
+                            if (!txt || txt.length > 35) return false;
+                            if (!/\bposts?\b/i.test(txt)) return false;
+                            if (/\bfollow/i.test(txt)) return false; // Strictly exclude followers/following!
+                            return true;
+                        });
+
+                    for (let el of elements) {
+                        let span = el.querySelector('span[title]');
+                        if (span && span.getAttribute('title')) {
+                            let t = span.getAttribute('title').trim();
+                            if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
+                        }
+                        let m = el.innerText.match(/([0-9,\\.]+[KkMmBb]?)\s*posts?/i) ||
+                                el.innerText.match(/posts?\s*([0-9,\\.]+[KkMmBb]?)/i);
+                        if (m) return m[1];
+                    }
+
+                    // Multi-line search
+                    let lines = (container.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+                    for (let i = 0; i < lines.length; i++) {
+                        let l = lines[i].toLowerCase();
+                        if (l === 'posts' || l === 'post') {
+                            if (i > 0 && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i - 1])) return lines[i - 1];
+                            if (i + 1 < lines.length && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i + 1])) return lines[i + 1];
+                        }
+                        let m = lines[i].match(/([0-9,\\.]+[KkMmBb]?)\s+posts?/i) ||
+                                lines[i].match(/posts?\s+([0-9,\\.]+[KkMmBb]?)/i);
+                        if (m) return m[1];
+                    }
                     return '';
                 }
 
@@ -320,7 +406,6 @@ class HeadlessWebViewScraper(private val context: Context) {
                             if (!t || t.length > 50 || t.includes('\n')) return false;
                             let lower = t.toLowerCase();
                             if (lower === targetHandle.toLowerCase() || lower === '@' + targetHandle.toLowerCase()) return false;
-                            // Reject logged-in viewer's name if targeting another user
                             if (lower === 'lucifer' && targetHandle.toLowerCase() !== 'lucifer') return false;
                             if (/^(follow|following|edit profile|share profile|message|contact|options|posts|followers)$/i.test(lower)) return false;
                             
@@ -343,6 +428,22 @@ class HeadlessWebViewScraper(private val context: Context) {
                     let container = document.querySelector('main') || document.body;
                     if (!container) return '';
 
+                    let boilerplate = [
+                        'follow to see their photos and videos',
+                        'follow this account to see',
+                        'follow to see',
+                        'this account is private',
+                        'see instagram photos and videos',
+                        'see instagram photos',
+                        'more posts from',
+                        'no posts yet',
+                        'when they share',
+                        'already follow',
+                        'about help press api jobs',
+                        'privacy terms',
+                        'threads'
+                    ];
+
                     let bioCandidates = [];
                     let elements = Array.from(container.querySelectorAll('span[dir="auto"], div[dir="auto"], h1[dir="auto"], span._ap3a, div._ap3a, div._aa_c'));
 
@@ -359,8 +460,10 @@ class HeadlessWebViewScraper(private val context: Context) {
                         if (/^[0-9,\\.]+\s+(followers?|following|posts?)${'$'}/i.test(text)) continue;
                         if (/^(followers?|following|posts?)${'$'}/i.test(text)) continue;
                         if (text.includes('followers') && text.includes('following')) continue;
-                        if (text.includes('See Instagram photos and videos') || text.includes('More posts from') || text.includes('About Help Press API Jobs')) continue;
                         if (/^(posts|reels|tagged)$/i.test(text)) continue;
+
+                        // Strict boilerplate filter
+                        if (boilerplate.some(bp => lower.includes(bp))) continue;
 
                         let style = window.getComputedStyle(el);
                         let ws = style ? (style.whiteSpace || '') : '';
@@ -395,20 +498,24 @@ class HeadlessWebViewScraper(private val context: Context) {
 
                         if (lastStatIdx !== -1 && lastStatIdx + 1 < lines.length) {
                             let bioLines = [];
-                            let stopKeywords = ['posts', 'reels', 'tagged', 'see instagram', 'more posts from', 'about', 'help', 'threads.net', 'threads'];
+                            let stopKeywords = [
+                                'posts', 'reels', 'tagged', 'see instagram', 'more posts from',
+                                'this account is private', 'follow to see', 'about', 'help', 'threads.net', 'threads'
+                            ];
                             let actionButtons = ['follow', 'following', 'message', 'edit profile', 'share profile', 'contact', 'options'];
 
                             for (let i = lastStatIdx + 1; i < lines.length; i++) {
                                 let line = lines[i];
                                 let lower = line.toLowerCase();
 
-                                if (stopKeywords.some(sk => lower === sk || lower.startsWith(sk))) break;
+                                if (stopKeywords.some(sk => lower.includes(sk))) break;
                                 if (actionButtons.includes(lower)) continue;
                                 if (lower === targetHandle.toLowerCase() || lower === '@' + targetHandle.toLowerCase()) continue;
                                 if (fullName && lower === fullName.toLowerCase()) continue;
                                 if (/^[0-9,\\.]+\s+(followers?|following|posts?)${'$'}/i.test(lower)) continue;
+                                if (boilerplate.some(bp => lower.includes(bp))) continue;
 
-                                bioLines.push(line);
+                                bioLines.add(line);
                             }
                             if (bioLines.length > 0) {
                                 return bioLines.join('\n');
@@ -451,10 +558,10 @@ class HeadlessWebViewScraper(private val context: Context) {
                         // Extract targeted script JSON data
                         let scriptData = extractScriptData(cleanHandle);
 
-                        // Extract DOM metrics & text
-                        let domFollowing = extractStat('following');
-                        let domFollowers = extractStat('followers') || extractStat('follower');
-                        let domPosts = extractStat('posts') || extractStat('post');
+                        // Extract DOM metrics & text using distinct extraction functions
+                        let domFollowers = extractFollowers();
+                        let domFollowing = extractFollowing();
+                        let domPosts = extractPosts();
                         let domFullName = extractDomFullName(cleanHandle);
                         let domBio = extractDomBio(cleanHandle, domFullName);
 
@@ -570,7 +677,7 @@ class HeadlessWebViewScraper(private val context: Context) {
             val headerText = root.optString("headerText")
             val fullText = root.optString("fullText")
 
-            Log.i(TAG, "[WebViewScraper] Parsing DOM Profile Card (hydrated=$isLiveHydrated): domF='$domFollowersRaw', domIng='$domFollowingRaw', scriptF='$scriptFollowers', scriptIng='$scriptFollowing', domBio='$domBio'")
+            Log.i(TAG, "[WebViewScraper] Parsing DOM Profile Card (hydrated=$isLiveHydrated): domF='$domFollowersRaw', domIng='$domFollowingRaw', domP='$domPostsRaw', scriptF='$scriptFollowers', scriptIng='$scriptFollowing', domBio='$domBio'")
 
             var followers = 0L
             var following = 0L
@@ -615,19 +722,31 @@ class HeadlessWebViewScraper(private val context: Context) {
                 if (m.find()) posts = InstagramScraper.parseFormattedCount(m.group(1))
             }
 
-            // 4. Fallback to CDN meta description ONLY if live DOM was NOT hydrated
-            if (!isLiveHydrated) {
-                if (followers == 0L && desc.isNotBlank()) {
-                    val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+follower", Pattern.CASE_INSENSITIVE).matcher(desc)
-                    if (m.find()) followers = InstagramScraper.parseFormattedCount(m.group(1))
+            // 4. Safe recovery: If DOM produced identical values across all 3 stats (suspicious collision), or failed to hydrate
+            val isSuspiciousCollision = (followers > 0L && followers == following && followers == posts)
+            if (!isLiveHydrated || isSuspiciousCollision) {
+                var descFollowers = 0L
+                var descFollowing = 0L
+                var descPosts = 0L
+
+                if (desc.isNotBlank()) {
+                    val m1 = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+follower", Pattern.CASE_INSENSITIVE).matcher(desc)
+                    if (m1.find()) descFollowers = InstagramScraper.parseFormattedCount(m1.group(1))
+                    val m2 = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+following", Pattern.CASE_INSENSITIVE).matcher(desc)
+                    if (m2.find()) descFollowing = InstagramScraper.parseFormattedCount(m2.group(1))
+                    val m3 = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+post", Pattern.CASE_INSENSITIVE).matcher(desc)
+                    if (m3.find()) descPosts = InstagramScraper.parseFormattedCount(m3.group(1))
                 }
-                if (following == 0L && desc.isNotBlank()) {
-                    val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+following", Pattern.CASE_INSENSITIVE).matcher(desc)
-                    if (m.find()) following = InstagramScraper.parseFormattedCount(m.group(1))
-                }
-                if (posts == 0L && desc.isNotBlank()) {
-                    val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+post", Pattern.CASE_INSENSITIVE).matcher(desc)
-                    if (m.find()) posts = InstagramScraper.parseFormattedCount(m.group(1))
+
+                if (isSuspiciousCollision) {
+                    // Recover following and posts from desc if distinct
+                    if (descFollowing > 0L && descFollowing != followers) following = descFollowing
+                    if (descPosts > 0L && descPosts != followers) posts = descPosts
+                    if (descFollowers > 0L) followers = descFollowers
+                } else {
+                    if (followers == 0L && descFollowers > 0L) followers = descFollowers
+                    if (following == 0L && descFollowing > 0L) following = descFollowing
+                    if (posts == 0L && descPosts > 0L) posts = descPosts
                 }
             }
 
@@ -708,13 +827,13 @@ class HeadlessWebViewScraper(private val context: Context) {
                         )
                         val stopKeywords = setOf(
                             "posts", "reels", "tagged", "see instagram", "more posts from",
-                            "about", "blog", "help", "privacy", "terms"
+                            "this account is private", "follow to see", "about", "blog", "help", "privacy", "terms"
                         )
                         val bioLines = mutableListOf<String>()
 
                         for (line in afterStats) {
                             val lower = line.lowercase()
-                            if (stopKeywords.contains(lower) ||
+                            if (stopKeywords.any { lower.contains(it) } ||
                                 lower.startsWith("see instagram") ||
                                 lower.startsWith("more posts from") ||
                                 lower.startsWith("http://") ||
@@ -741,15 +860,30 @@ class HeadlessWebViewScraper(private val context: Context) {
                 bio = bio.removePrefix(fullName).trim()
             }
 
-            // Strict cleanup: Disallow standard Instagram boilerplate from being treated as a bio
-            if (bio.contains("See Instagram photos and videos", ignoreCase = true) ||
-                bio.matches(Regex("(?i)^[\\d,\\.KkMmBb]+\\s+Followers?,\\s+[\\d,\\.KkMmBb]+\\s+Following.*")) ||
-                bio.startsWith("Monitoring active for")
-            ) {
+            // Comprehensive cleanup: Disallow standard Instagram boilerplate from being treated as a bio
+            val boilerplatePhrases = listOf(
+                "See Instagram photos and videos",
+                "Follow to see their photos and videos",
+                "Follow this account to see",
+                "This account is private",
+                "This Account is Private",
+                "Monitoring active for",
+                "No posts yet",
+                "When they share photos",
+                "Already follow"
+            )
+            for (phrase in boilerplatePhrases) {
+                if (bio.contains(phrase, ignoreCase = true)) {
+                    bio = ""
+                    break
+                }
+            }
+
+            if (bio.matches(Regex("(?i)^[\\d,\\.KkMmBb]+\\s+Followers?,\\s+[\\d,\\.KkMmBb]+\\s+Following.*"))) {
                 bio = ""
             }
 
-            Log.i(TAG, "[WebViewScraper] Final parsed profile: name='$fullName', bio='$bio', following=$following, followers=$followers")
+            Log.i(TAG, "[WebViewScraper] Final parsed profile: name='$fullName', bio='$bio', following=$following, followers=$followers, posts=$posts")
 
             if (followers == 0L && following == 0L && posts == 0L && headerText.isBlank() && !desc.contains("from ")) {
                 Log.w(TAG, "[WebViewScraper] Zero stats and missing header -> @$handle is Deactivated")
