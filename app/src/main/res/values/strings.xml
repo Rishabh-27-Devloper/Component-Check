@@ -1,0 +1,25 @@
+<resources>
+    <string name="app_name">Component Check</string>
+    <string name="subtitle_monitor">Instagram Profile Monitor</string>
+    <string name="add_profile">Add Profile</string>
+    <string name="enter_handle">Enter Instagram Handle (e.g. zuck)</string>
+    <string name="handle_hint">Username without @</string>
+    <string name="save">Save &amp; Monitor</string>
+    <string name="cancel">Cancel</string>
+    <string name="delete">Delete</string>
+    <string name="refresh">Refresh</string>
+    <string name="history">Change History</string>
+    <string name="active">Active</string>
+    <string name="deactivated">Deactivated</string>
+    <string name="followers">Followers</string>
+    <string name="following">Following</string>
+    <string name="posts">Posts</string>
+    <string name="no_profiles_yet">No profiles monitored yet</string>
+    <string name="no_profiles_hint">Tap the + button below to start tracking an Instagram account.</string>
+    <string name="connect_account">Connect Instagram (Optional)</string>
+    <string name="connected_badge">Connected</string>
+    <string name="guest_badge">Guest Mode</string>
+    <string name="settings">Settings</string>
+    <string name="notification_channel_name">Instagram Monitor Alerts</string>
+    <string name="notification_channel_desc">High priority alerts when a monitored Instagram profile changes</string>
+</resources>

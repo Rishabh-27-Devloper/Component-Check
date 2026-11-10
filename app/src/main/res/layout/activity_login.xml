@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fitsSystemWindows="true"
+    android:background="@color/surface_light"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbarLogin"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="@color/card_bg"
+        app:navigationIcon="@drawable/ic_open_in_browser"
+        app:navigationIconTint="@color/text_primary"
+        app:title="Connect Instagram"
+        app:titleTextColor="@color/text_primary" />
+
+    <!-- Privacy & Security Guarantee Banner -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#EFF6FF"
+        android:orientation="horizontal"
+        android:padding="12dp">
+
+        <ImageView
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:contentDescription="@null"
+            android:src="@drawable/ic_instagram" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:text="Log in securely via Instagram's official page to unlock unthrottled profile updates. We never store your password."
+            android:textColor="#1E40AF"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+
+    <ProgressBar
+        android:id="@+id/progressBarWeb"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:indeterminate="true"
+        android:indeterminateTint="@color/ig_purple"
+        android:visibility="gone" />
+
+    <WebView
+        android:id="@+id/webViewInstagram"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>

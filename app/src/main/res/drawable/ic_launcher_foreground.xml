@@ -1,0 +1,46 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.65"
+        android:scaleY="0.65"
+        android:translateX="18.9"
+        android:translateY="18.9">
+        
+        <!-- Outer Camera / Monitor Outline -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M24,14h60c5.52,0 10,4.48 10,10v60c0,5.52 -4.48,10 -10,10H24c-5.52,0 -10,-4.48 -10,-10V24c0,-5.52 4.48,-10 10,-10z" />
+            
+        <!-- Center Eye / Lens -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="5.5"
+            android:pathData="M54,34 A20,20 0 1,0 54,74 A20,20 0 1,0 54,34 Z" />
+            
+        <!-- Lens Center Core -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M54,46 A8,8 0 1,0 54,62 A8,8 0 1,0 54,46 Z" />
+            
+        <!-- Camera Flash / Sensor Dot -->
+        <path
+            android:fillColor="#FFFCB045"
+            android:pathData="M76,28 A4.5,4.5 0 1,0 76,37 A4.5,4.5 0 1,0 76,28 Z" />
+
+        <!-- Monitoring Radar Wave / Pulse Accent -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFCB045"
+            android:strokeWidth="4"
+            android:strokeLineCap="round"
+            android:pathData="M32,84 L44,84 L48,76 L54,92 L60,80 L64,84 L76,84" />
+    </group>
+</vector>

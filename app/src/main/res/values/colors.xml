@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    
+    <!-- Brand / Gradient Colors -->
+    <color name="ig_purple">#833AB4</color>
+    <color name="ig_magenta">#FD1D1D</color>
+    <color name="ig_orange">#FCB045</color>
+    <color name="ig_primary">#9C27B0</color>
+    <color name="ig_primary_variant">#673AB7</color>
+    
+    <!-- Status & Delta Colors -->
+    <color name="status_active">#10B981</color>
+    <color name="status_active_bg">#E6F4EA</color>
+    <color name="status_deactivated">#EF4444</color>
+    <color name="status_deactivated_bg">#FCE8E6</color>
+    <color name="status_warning">#F59E0B</color>
+    <color name="status_warning_bg">#FEF3C7</color>
+    
+    <color name="delta_positive">#16A34A</color>
+    <color name="delta_positive_bg">#DCFCE7</color>
+    <color name="delta_negative">#DC2626</color>
+    <color name="delta_negative_bg">#FEE2E2</color>
+
+    <!-- Surfaces & Neutrals -->
+    <color name="surface_light">#F8F9FA</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="card_stroke">#E5E7EB</color>
+    <color name="text_primary">#111827</color>
+    <color name="text_secondary">#6B7280</color>
+    <color name="divider">#E5E7EB</color>
+</resources>
