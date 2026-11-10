@@ -272,15 +272,9 @@ class InstagramScraper(
                 handle
             }
 
-            val cleanBio = if (unescapedDesc.contains("See Instagram photos and videos", ignoreCase = true) ||
-                unescapedDesc.contains("Followers, ") ||
-                unescapedDesc.contains("Following, ") ||
-                unescapedDesc.startsWith("0 Followers")
-            ) {
-                ""
-            } else {
-                unescapedDesc
-            }
+            // Note: og:description contains counter boilerplate (e.g. "X Followers, Y Following... - See Instagram photos...")
+            // The real bio is never in HTML meta tags, so we set bio = "" here and let the DOM scraper / API extract the real bio.
+            val cleanBio = ""
 
             if (followers > 0L || following > 0L || posts > 0L || unescapedDesc.isNotBlank() || ogTitle.contains(handle, ignoreCase = true)) {
                 return ProfileResult.Success(
