@@ -139,7 +139,7 @@ class HeadlessWebViewScraper(private val context: Context) {
 
     private fun injectScraperScript(webView: WebView, handle: String) {
         val script = """
-            (function() {
+            (async function() {
                 let cleanHandle = '$handle'.toLowerCase();
                 let startTime = Date.now();
                 let maxWaitMs = 14000;
@@ -156,7 +156,34 @@ class HeadlessWebViewScraper(private val context: Context) {
                     window.ScraperBridge.postResult(JSON.stringify(payload));
                 }
 
-                function extractScriptData(handle) {
+                // 1. FAST PATH: Authenticated Same-Origin in-page API fetch
+                try {
+                    let resp = await fetch('https://www.instagram.com/api/v1/users/web_profile_info/?username=' + cleanHandle, {
+                        method: 'GET',
+                        headers: {
+                            'x-ig-app-id': '936619743392459',
+                            'x-asbd-id': '129477',
+                            'x-requested-with': 'XMLHttpRequest'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (resp.status === 200) {
+                        let j = await resp.json();
+                        if (j && j.data && j.data.user && j.data.user.username && j.data.user.username.toLowerCase() === cleanHandle) {
+                            postResult({
+                                success: true,
+                                source: 'API',
+                                user: j.data.user
+                            });
+                            return;
+                        }
+                    }
+                } catch (e) {
+                    // Continue to DOM parsing
+                }
+
+                function extractScriptData(targetHandle) {
                     let scriptBio = '';
                     let scriptFullName = '';
                     let scriptFollowers = '';
@@ -168,17 +195,17 @@ class HeadlessWebViewScraper(private val context: Context) {
                         let scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
                         for (let s of scripts) {
                             let text = s.innerText || s.textContent || '';
-                            if (!text || (!text.includes('biography') && !text.includes('edge_follow') && !text.includes('following_count'))) continue;
+                            if (!text || !text.includes(targetHandle)) continue;
 
-                            // 1. Try deep JSON search if valid JSON
                             if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
                                 try {
                                     let parsed = JSON.parse(text);
                                     function findUser(obj) {
                                         if (!obj || typeof obj !== 'object') return;
-                                        if ('biography' in obj && ('username' in obj || 'full_name' in obj)) {
+                                        if ('biography' in obj && 'username' in obj) {
                                             let uname = String(obj.username || '').toLowerCase();
-                                            if (!uname || uname === handle) {
+                                            // STRICT CHECK: Only match if username explicitly equals target handle
+                                            if (uname === targetHandle) {
                                                 if (!scriptBio && obj.biography) scriptBio = String(obj.biography);
                                                 if (!scriptFullName && obj.full_name) scriptFullName = String(obj.full_name);
                                                 if (!scriptFollowers && obj.edge_followed_by && obj.edge_followed_by.count !== undefined) {
@@ -206,38 +233,6 @@ class HeadlessWebViewScraper(private val context: Context) {
                                 } catch (e) {}
                             }
 
-                            // 2. Regex fallback on script text
-                            if (!scriptBio) {
-                                let m = text.match(/"biography"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-                                if (m && m[1]) {
-                                    try { scriptBio = JSON.parse('"' + m[1] + '"'); } catch (e) { scriptBio = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"'); }
-                                }
-                            }
-                            if (!scriptFullName) {
-                                let m = text.match(/"full_name"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-                                if (m && m[1]) {
-                                    try { scriptFullName = JSON.parse('"' + m[1] + '"'); } catch (e) { scriptFullName = m[1]; }
-                                }
-                            }
-                            if (!scriptFollowing) {
-                                let m = text.match(/"edge_follow"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) || text.match(/"following_count"\s*:\s*(\d+)/);
-                                if (m && m[1]) scriptFollowing = m[1];
-                            }
-                            if (!scriptFollowers) {
-                                let m = text.match(/"edge_followed_by"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) || text.match(/"follower_count"\s*:\s*(\d+)/);
-                                if (m && m[1]) scriptFollowers = m[1];
-                            }
-                            if (!scriptPosts) {
-                                let m = text.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) || text.match(/"media_count"\s*:\s*(\d+)/);
-                                if (m && m[1]) scriptPosts = m[1];
-                            }
-                            if (!scriptPic) {
-                                let m = text.match(/"profile_pic_url_hd"\s*:\s*"((?:[^"\\]|\\.)*)"/) || text.match(/"profile_pic_url"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-                                if (m && m[1]) {
-                                    try { scriptPic = JSON.parse('"' + m[1] + '"'); } catch (e) { scriptPic = m[1]; }
-                                }
-                            }
-
                             if (scriptBio && scriptFollowing) break;
                         }
                     } catch (e) {}
@@ -245,81 +240,88 @@ class HeadlessWebViewScraper(private val context: Context) {
                     return { scriptBio, scriptFullName, scriptFollowers, scriptFollowing, scriptPosts, scriptPic };
                 }
 
-                function extractStatCount(keyword) {
-                    let root = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
-                    if (!root) return '';
-
-                    // 1. Check anchor or list item matching href
-                    let el = root.querySelector('a[href*="/' + keyword + '"], li:has(a[href*="/' + keyword + '"])') ||
-                             document.querySelector('a[href*="/' + keyword + '"]');
-                    if (el) {
-                        let span = el.querySelector('span[title]');
+                function extractStat(type) {
+                    // 1. Direct anchor matching on entire document
+                    let anchor = document.querySelector('a[href*="/' + type + '/"], a[href$="/' + type + '"], a[href*="/' + type + '"]');
+                    if (anchor) {
+                        let span = anchor.querySelector('span[title]');
                         if (span && span.getAttribute('title')) {
                             let t = span.getAttribute('title').trim();
-                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(t)) return t;
+                            if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
                         }
-                        let txt = el.innerText || '';
-                        let m = txt.match(/([\d,\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) || 
-                                txt.match(/(?:followers?|following|posts?)\s*([\d,\.]+[KkMmBb]?)/i) ||
-                                txt.match(/^([\d,\.]+[KkMmBb]?)${'$'}/);
+                        let txt = (anchor.innerText || '').trim();
+                        let m = txt.match(/([0-9,\\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) ||
+                                txt.match(/(?:followers?|following|posts?)\s*([0-9,\\.]+[KkMmBb]?)/i) ||
+                                txt.match(/^([0-9,\\.]+[KkMmBb]?)${'$'}/);
                         if (m) return m[1];
                     }
 
-                    // 2. Search all elements containing keyword as a word
-                    let regex = new RegExp('\\b' + keyword + '\\b', 'i');
-                    let elements = Array.from(root.querySelectorAll('li, a, div, span, button'))
-                        .filter(e => e.children.length <= 3 && e.innerText && regex.test(e.innerText) && !/edit profile|share profile|message|contact/i.test(e.innerText));
-                    
-                    for (let e of elements) {
-                        let span = e.querySelector('span[title]');
-                        if (span && span.getAttribute('title')) {
-                            let t = span.getAttribute('title').trim();
-                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(t)) return t;
-                        }
-                        let m = e.innerText.match(/([\d,\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) ||
-                                e.innerText.match(/(?:followers?|following|posts?)\s*([\d,\.]+[KkMmBb]?)/i);
-                        if (m) return m[1];
-                        if (e.previousElementSibling) {
-                            let prevText = (e.previousElementSibling.innerText || '').trim();
-                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(prevText)) return prevText;
-                        }
-                        if (e.nextElementSibling) {
-                            let nextText = (e.nextElementSibling.innerText || '').trim();
-                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(nextText)) return nextText;
-                        }
-                    }
+                    // 2. Search container elements in main or body
+                    let container = document.querySelector('main') || document.body;
+                    if (container) {
+                        let elements = Array.from(container.querySelectorAll('li, a, div, span, button'))
+                            .filter(el => {
+                                if (el.children.length > 3) return false;
+                                let txt = (el.innerText || '').trim();
+                                if (!txt) return false;
+                                let re = new RegExp('\\b' + type + '\\b', 'i');
+                                return re.test(txt) && !/edit profile|share profile|message|contact/i.test(txt);
+                            });
 
-                    // 3. Line by line search in root.innerText
-                    let lines = (root.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
-                    for (let i = 0; i < lines.length; i++) {
-                        let l = lines[i].toLowerCase();
-                        if (l === keyword || l === keyword + 's' || (keyword === 'followers' && l === 'follower')) {
-                            if (i > 0 && /^[\d,\.]+[KkMmBb]?${'$'}/.test(lines[i - 1])) {
-                                return lines[i - 1];
+                        for (let el of elements) {
+                            let span = el.querySelector('span[title]');
+                            if (span && span.getAttribute('title')) {
+                                let t = span.getAttribute('title').trim();
+                                if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(t)) return t;
                             }
-                            if (i + 1 < lines.length && /^[\d,\.]+[KkMmBb]?${'$'}/.test(lines[i + 1])) {
-                                return lines[i + 1];
+                            let m = el.innerText.match(/([0-9,\\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) ||
+                                    el.innerText.match(/(?:followers?|following|posts?)\s*([0-9,\\.]+[KkMmBb]?)/i);
+                            if (m) return m[1];
+
+                            if (el.previousElementSibling) {
+                                let prev = (el.previousElementSibling.innerText || '').trim();
+                                if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(prev)) return prev;
+                            }
+                            if (el.nextElementSibling) {
+                                let next = (el.nextElementSibling.innerText || '').trim();
+                                if (/^[0-9,\\.]+[KkMmBb]?${'$'}/.test(next)) return next;
                             }
                         }
-                        let m = lines[i].match(new RegExp('([\\d,\\.]+[KkMmBb]?)\\s+' + keyword, 'i')) ||
-                                lines[i].match(new RegExp(keyword + '\\s+([\\d,\\.]+[KkMmBb]?)', 'i'));
-                        if (m) return m[1];
+
+                        // 3. Multi-line search
+                        let lines = (container.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+                        for (let i = 0; i < lines.length; i++) {
+                            let l = lines[i].toLowerCase();
+                            if (l === type || l === type + 's' || (type === 'followers' && l === 'follower')) {
+                                if (i > 0 && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i - 1])) {
+                                    return lines[i - 1];
+                                }
+                                if (i + 1 < lines.length && /^[0-9,\\.]+[KkMmBb]?${'$'}/.test(lines[i + 1])) {
+                                    return lines[i + 1];
+                                }
+                            }
+                            let m = lines[i].match(new RegExp('([0-9,\\.]+[KkMmBb]?)\\s+' + type, 'i')) ||
+                                    lines[i].match(new RegExp(type + '\\s+([0-9,\\.]+[KkMmBb]?)', 'i'));
+                            if (m) return m[1];
+                        }
                     }
 
                     return '';
                 }
 
-                function extractDomFullName(handle) {
-                    let root = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
-                    if (!root) return '';
+                function extractDomFullName(targetHandle) {
+                    let container = document.querySelector('main') || document.body;
+                    if (!container) return '';
 
-                    let candidates = Array.from(root.querySelectorAll('h1, h2, span, div'))
+                    let candidates = Array.from(container.querySelectorAll('h1, h2, span, div'))
                         .filter(el => {
-                            if (el.closest('ul') || el.closest('button') || el.closest('a') || el.closest('nav')) return false;
+                            if (el.closest('ul') || el.closest('button') || el.closest('a') || el.closest('nav') || el.closest('header')) return false;
                             let t = (el.innerText || '').trim();
                             if (!t || t.length > 50 || t.includes('\n')) return false;
                             let lower = t.toLowerCase();
-                            if (lower === handle.toLowerCase() || lower === '@' + handle.toLowerCase()) return false;
+                            if (lower === targetHandle.toLowerCase() || lower === '@' + targetHandle.toLowerCase()) return false;
+                            // Reject logged-in viewer's name if targeting another user
+                            if (lower === 'lucifer' && targetHandle.toLowerCase() !== 'lucifer') return false;
                             if (/^(follow|following|edit profile|share profile|message|contact|options|posts|followers)$/i.test(lower)) return false;
                             
                             let style = window.getComputedStyle(el);
@@ -330,46 +332,46 @@ class HeadlessWebViewScraper(private val context: Context) {
 
                     for (let c of candidates) {
                         let t = (c.innerText || '').trim();
-                        if (t && !t.toLowerCase().includes(handle.toLowerCase())) {
+                        if (t && !t.toLowerCase().includes(targetHandle.toLowerCase())) {
                             return t;
                         }
                     }
                     return '';
                 }
 
-                function extractDomBio(handle, fullName) {
-                    let root = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
-                    if (!root) return '';
+                function extractDomBio(targetHandle, fullName) {
+                    let container = document.querySelector('main') || document.body;
+                    if (!container) return '';
 
                     let bioCandidates = [];
-                    let allElements = Array.from(root.querySelectorAll('div, span, p, h1, section'));
+                    let elements = Array.from(container.querySelectorAll('span[dir="auto"], div[dir="auto"], h1[dir="auto"], span._ap3a, div._ap3a, div._aa_c'));
 
-                    for (let el of allElements) {
-                        if (el.children.length > 5) continue;
+                    for (let el of elements) {
                         if (el.closest('ul') || el.closest('button') || el.closest('a') || el.closest('nav') || el.closest('footer')) continue;
 
                         let text = (el.innerText || '').trim();
                         if (!text || text.length < 2) continue;
 
-                        if (text.toLowerCase() === handle.toLowerCase() || text.toLowerCase() === ('@' + handle).toLowerCase()) continue;
-                        if (fullName && text.toLowerCase() === fullName.toLowerCase()) continue;
+                        let lower = text.toLowerCase();
+                        if (lower === targetHandle.toLowerCase() || lower === '@' + targetHandle.toLowerCase()) continue;
+                        if (fullName && lower === fullName.toLowerCase()) continue;
                         if (/^(follow|following|edit profile|share profile|message|contact|options|threads|similar accounts)$/i.test(text)) continue;
-                        if (/^[\d,\.]+\s+(followers?|following|posts?)${'$'}/i.test(text)) continue;
+                        if (/^[0-9,\\.]+\s+(followers?|following|posts?)${'$'}/i.test(text)) continue;
                         if (/^(followers?|following|posts?)${'$'}/i.test(text)) continue;
                         if (text.includes('followers') && text.includes('following')) continue;
                         if (text.includes('See Instagram photos and videos') || text.includes('More posts from') || text.includes('About Help Press API Jobs')) continue;
+                        if (/^(posts|reels|tagged)$/i.test(text)) continue;
 
                         let style = window.getComputedStyle(el);
                         let ws = style ? (style.whiteSpace || '') : '';
                         let isPre = ws.includes('pre') || ws.includes('break');
                         let isDirAuto = el.getAttribute('dir') === 'auto';
-                        let isBioClass = el.className && typeof el.className === 'string' && 
-                                         (el.className.includes('_ap3a') || el.className.includes('_aa_c') || el.className.includes('_aaco') || el.className.includes('_aacl'));
+                        let isBioClass = el.className && typeof el.className === 'string' && (el.className.includes('_ap3a') || el.className.includes('_aa_c'));
 
                         if (isPre || isDirAuto || isBioClass || text.includes('\n')) {
                             bioCandidates.push({
                                 text: text,
-                                score: (isPre ? 3 : 0) + (isDirAuto ? 2 : 0) + (isBioClass ? 3 : 0) + (text.includes('\n') ? 2 : 0) + Math.min(text.length / 10, 5)
+                                score: (isPre ? 4 : 0) + (isDirAuto ? 3 : 0) + (isBioClass ? 2 : 0) + (text.includes('\n') ? 3 : 0) + Math.min(text.length / 10, 5)
                             });
                         }
                     }
@@ -379,10 +381,10 @@ class HeadlessWebViewScraper(private val context: Context) {
                         return bioCandidates[0].text;
                     }
 
-                    // Method B: Parse text lines after stats
-                    let headerText = root.innerText || '';
-                    if (headerText) {
-                        let lines = headerText.split('\n').map(l => l.trim()).filter(Boolean);
+                    // Parse text lines inside main after stats
+                    let mainText = container.innerText || '';
+                    if (mainText) {
+                        let lines = mainText.split('\n').map(l => l.trim()).filter(Boolean);
                         let lastStatIdx = -1;
                         for (let i = 0; i < lines.length; i++) {
                             let l = lines[i].toLowerCase();
@@ -402,9 +404,9 @@ class HeadlessWebViewScraper(private val context: Context) {
 
                                 if (stopKeywords.some(sk => lower === sk || lower.startsWith(sk))) break;
                                 if (actionButtons.includes(lower)) continue;
-                                if (lower === handle.toLowerCase() || lower === '@' + handle.toLowerCase()) continue;
+                                if (lower === targetHandle.toLowerCase() || lower === '@' + targetHandle.toLowerCase()) continue;
                                 if (fullName && lower === fullName.toLowerCase()) continue;
-                                if (/^[\d,\.]+\s+(followers?|following|posts?)${'$'}/i.test(lower)) continue;
+                                if (/^[0-9,\\.]+\s+(followers?|following|posts?)${'$'}/i.test(lower)) continue;
 
                                 bioLines.push(line);
                             }
@@ -424,22 +426,20 @@ class HeadlessWebViewScraper(private val context: Context) {
                         let desc = document.querySelector('meta[property="og:description"]')?.content || 
                                    document.querySelector('meta[name="description"]')?.content || '';
                         let img = document.querySelector('meta[property="og:image"]')?.content || '';
-                        let header = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
-                        let headerText = header ? (header.innerText || '') : '';
-                        let mainText = document.querySelector('main')?.innerText || '';
-                        let fullText = (headerText + '\n' + mainText).substring(0, 5000);
+                        let mainEl = document.querySelector('main') || document.body;
+                        let fullText = (mainEl ? mainEl.innerText : '').substring(0, 5000);
                         let bodyText = document.body ? document.body.innerText.substring(0, 2000) : '';
 
-                        // 1. True deactivation / missing check:
+                        // True deactivation / missing check:
                         let isNotFoundMarker = title.includes("Page Not Found") ||
                                                title.includes("isn't available") ||
                                                bodyText.includes("Sorry, this page isn't available") ||
                                                bodyText.includes("The link you followed may be broken") ||
                                                bodyText.includes("page may have been removed");
 
-                        let hasLiveStatsInHeader = /followers?/i.test(headerText) && /following/i.test(headerText);
+                        let hasLiveStats = /followers?/i.test(fullText) && /following/i.test(fullText);
 
-                        if (isNotFoundMarker && !hasLiveStatsInHeader && elapsed >= 2000) {
+                        if (isNotFoundMarker && !hasLiveStats && elapsed >= 2000) {
                             postResult({
                                 success: true,
                                 source: 'DEACTIVATED',
@@ -448,20 +448,19 @@ class HeadlessWebViewScraper(private val context: Context) {
                             return;
                         }
 
-                        // 2. Extract JSON script payload
+                        // Extract targeted script JSON data
                         let scriptData = extractScriptData(cleanHandle);
 
-                        // 3. Extract DOM metrics & text
-                        let domFollowing = extractStatCount('following');
-                        let domFollowers = extractStatCount('followers') || extractStatCount('follower');
-                        let domPosts = extractStatCount('posts') || extractStatCount('post');
+                        // Extract DOM metrics & text
+                        let domFollowing = extractStat('following');
+                        let domFollowers = extractStat('followers') || extractStat('follower');
+                        let domPosts = extractStat('posts') || extractStat('post');
                         let domFullName = extractDomFullName(cleanHandle);
                         let domBio = extractDomBio(cleanHandle, domFullName);
 
-                        // 4. Check if React has hydrated the profile
                         let hasHydrated = (domFollowing && domFollowers) || 
                                           (scriptData.scriptFollowing && scriptData.scriptFollowers) ||
-                                          (hasLiveStatsInHeader && (domFollowing || scriptData.scriptFollowing));
+                                          (hasLiveStats && (domFollowing || scriptData.scriptFollowing));
 
                         if (hasHydrated || elapsed >= maxWaitMs) {
                             postResult({
@@ -481,7 +480,7 @@ class HeadlessWebViewScraper(private val context: Context) {
                                 scriptFollowers: scriptData.scriptFollowers,
                                 scriptFollowing: scriptData.scriptFollowing,
                                 scriptPosts: scriptData.scriptPosts,
-                                headerText: headerText,
+                                headerText: fullText,
                                 fullText: fullText
                             });
                         }
@@ -505,7 +504,7 @@ class HeadlessWebViewScraper(private val context: Context) {
             })();
         """.trimIndent()
 
-        Log.i(TAG, "[WebViewScraper] Injecting active polling scraper script into page...")
+        Log.i(TAG, "[WebViewScraper] Injecting active scraper script into page...")
         webView.evaluateJavascript(script, null)
     }
 
@@ -524,7 +523,7 @@ class HeadlessWebViewScraper(private val context: Context) {
 
             if (source == "API") {
                 val user = root.getJSONObject("user")
-                val fullName = user.optString("full_name", handle)
+                val fullName = user.optString("full_name", "").ifBlank { handle }
                 val bio = user.optString("biography", "")
                 val followerCount = user.optJSONObject("edge_followed_by")?.optLong("count", 0L) ?: 0L
                 val followingCount = user.optJSONObject("edge_follow")?.optLong("count", 0L) ?: 0L
@@ -534,11 +533,11 @@ class HeadlessWebViewScraper(private val context: Context) {
                 val isPrivate = user.optBoolean("is_private", false)
                 val isVerified = user.optBoolean("is_verified", false)
 
-                Log.i(TAG, "[WebViewScraper] Scraped via in-page API: $followerCount followers, $followingCount following, $postCount posts")
+                Log.i(TAG, "[WebViewScraper] Scraped via in-page API: name='$fullName', $followerCount followers, $followingCount following, $postCount posts, bio='$bio'")
                 return ProfileResult.Success(
                     ScrapedProfile(
                         username = handle,
-                        fullName = fullName.ifBlank { handle },
+                        fullName = fullName,
                         bio = bio,
                         followerCount = followerCount,
                         followingCount = followingCount,
@@ -571,13 +570,13 @@ class HeadlessWebViewScraper(private val context: Context) {
             val headerText = root.optString("headerText")
             val fullText = root.optString("fullText")
 
-            Log.i(TAG, "[WebViewScraper] Parsing DOM Profile Card (hydrated=$isLiveHydrated): domF='$domFollowersRaw', domIng='$domFollowingRaw', scriptF='$scriptFollowers', scriptIng='$scriptFollowing', domBio='$domBio', scriptBio='$scriptBio'")
+            Log.i(TAG, "[WebViewScraper] Parsing DOM Profile Card (hydrated=$isLiveHydrated): domF='$domFollowersRaw', domIng='$domFollowingRaw', scriptF='$scriptFollowers', scriptIng='$scriptFollowing', domBio='$domBio'")
 
             var followers = 0L
             var following = 0L
             var posts = 0L
 
-            // 1. Raw numbers from embedded JSON script state (highest fidelity live data)
+            // 1. Raw numbers from embedded JSON script state (if explicitly matched target handle)
             if (scriptFollowers.isNotBlank()) {
                 followers = scriptFollowers.toLongOrNull() ?: InstagramScraper.parseFormattedCount(scriptFollowers)
             }
@@ -602,7 +601,7 @@ class HeadlessWebViewScraper(private val context: Context) {
                 if (m.find()) posts = InstagramScraper.parseFormattedCount(m.group(1))
             }
 
-            // 3. Parsed from rendered DOM headerText
+            // 3. Parsed from rendered DOM text
             if (followers == 0L && headerText.isNotBlank()) {
                 val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+follower", Pattern.CASE_INSENSITIVE).matcher(headerText)
                 if (m.find()) followers = InstagramScraper.parseFormattedCount(m.group(1))
@@ -652,16 +651,9 @@ class HeadlessWebViewScraper(private val context: Context) {
                 }
             }
 
-            // Extract Full Name: Prioritize JSON script state -> live DOM card -> title/desc
-            var fullName = if (scriptFullName.isNotBlank() && !scriptFullName.equals(handle, ignoreCase = true)) {
-                scriptFullName
-            } else if (domFullName.isNotBlank() && !domFullName.equals(handle, ignoreCase = true)) {
-                domFullName
-            } else {
-                ""
-            }
-
-            if (fullName.isBlank() && title.contains("(@")) {
+            // Extract Full Name: Prioritize title/desc -> live DOM -> script (never viewer's "Lucifer")
+            var fullName = ""
+            if (title.contains("(@")) {
                 val candidate = title.substringBefore("(@").trim()
                 if (candidate.isNotBlank() && !candidate.equals(handle, ignoreCase = true) && !candidate.equals("Instagram", ignoreCase = true)) {
                     fullName = candidate
@@ -676,6 +668,18 @@ class HeadlessWebViewScraper(private val context: Context) {
                     }
                 }
             }
+            if (fullName.isBlank() && domFullName.isNotBlank() && !domFullName.equals(handle, ignoreCase = true)) {
+                fullName = domFullName
+            }
+            if (fullName.isBlank() && scriptFullName.isNotBlank() && !scriptFullName.equals(handle, ignoreCase = true)) {
+                fullName = scriptFullName
+            }
+
+            // Guard: Never assign "Lucifer" to a profile that is not @lucifer
+            if (fullName.equals("Lucifer", ignoreCase = true) && !handle.equals("Lucifer", ignoreCase = true)) {
+                fullName = ""
+            }
+
             if (fullName.isBlank()) {
                 fullName = handle
             }
