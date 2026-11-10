@@ -23,7 +23,7 @@ class HeadlessWebViewScraper(private val context: Context) {
 
     companion object {
         private const val TAG = "ComponentCheck"
-        private const val TIMEOUT_MS = 20000L
+        private const val TIMEOUT_MS = 25000L
         const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     }
@@ -31,7 +31,7 @@ class HeadlessWebViewScraper(private val context: Context) {
     class ScraperBridge(private val onResultReceived: (String) -> Unit) {
         @JavascriptInterface
         fun postResult(data: String) {
-            Log.i(TAG, "[WebViewBridge] Data received: ${data.take(200)}")
+            Log.i(TAG, "[WebViewBridge] Data received: ${data.take(300)}")
             onResultReceived(data)
         }
     }
@@ -95,11 +95,11 @@ class HeadlessWebViewScraper(private val context: Context) {
                             if (hasFired || isFinished || view == null) return
                             hasFired = true
 
-                            // Wait 2 seconds for client-side rendering
+                            // Inject active polling scraper into the live page
                             Handler(Looper.getMainLooper()).postDelayed({
                                 if (isFinished) return@postDelayed
                                 injectScraperScript(view, cleanHandle)
-                            }, 2000)
+                            }, 500)
                         }
                     }
 
@@ -140,162 +140,372 @@ class HeadlessWebViewScraper(private val context: Context) {
     private fun injectScraperScript(webView: WebView, handle: String) {
         val script = """
             (function() {
-                try {
-                    let desc = document.querySelector('meta[property="og:description"]')?.content || 
-                               document.querySelector('meta[name="description"]')?.content || '';
-                    let title = document.querySelector('meta[property="og:title"]')?.content || document.title || '';
-                    let img = document.querySelector('meta[property="og:image"]')?.content || '';
+                let cleanHandle = '$handle'.toLowerCase();
+                let startTime = Date.now();
+                let maxWaitMs = 14000;
+                let pollIntervalMs = 250;
+                let hasPosted = false;
+
+                function postResult(payload) {
+                    if (hasPosted) return;
+                    hasPosted = true;
+                    if (window._scraperPollTimer) {
+                        clearInterval(window._scraperPollTimer);
+                        window._scraperPollTimer = null;
+                    }
+                    window.ScraperBridge.postResult(JSON.stringify(payload));
+                }
+
+                function extractScriptData(handle) {
+                    let scriptBio = '';
+                    let scriptFullName = '';
+                    let scriptFollowers = '';
+                    let scriptFollowing = '';
+                    let scriptPosts = '';
+                    let scriptPic = '';
+
+                    try {
+                        let scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
+                        for (let s of scripts) {
+                            let text = s.innerText || s.textContent || '';
+                            if (!text || (!text.includes('biography') && !text.includes('edge_follow') && !text.includes('following_count'))) continue;
+
+                            // 1. Try deep JSON search if valid JSON
+                            if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
+                                try {
+                                    let parsed = JSON.parse(text);
+                                    function findUser(obj) {
+                                        if (!obj || typeof obj !== 'object') return;
+                                        if ('biography' in obj && ('username' in obj || 'full_name' in obj)) {
+                                            let uname = String(obj.username || '').toLowerCase();
+                                            if (!uname || uname === handle) {
+                                                if (!scriptBio && obj.biography) scriptBio = String(obj.biography);
+                                                if (!scriptFullName && obj.full_name) scriptFullName = String(obj.full_name);
+                                                if (!scriptFollowers && obj.edge_followed_by && obj.edge_followed_by.count !== undefined) {
+                                                    scriptFollowers = String(obj.edge_followed_by.count);
+                                                }
+                                                if (!scriptFollowing && obj.edge_follow && obj.edge_follow.count !== undefined) {
+                                                    scriptFollowing = String(obj.edge_follow.count);
+                                                }
+                                                if (!scriptPosts && obj.edge_owner_to_timeline_media && obj.edge_owner_to_timeline_media.count !== undefined) {
+                                                    scriptPosts = String(obj.edge_owner_to_timeline_media.count);
+                                                }
+                                                if (!scriptPic && (obj.profile_pic_url_hd || obj.profile_pic_url)) {
+                                                    scriptPic = String(obj.profile_pic_url_hd || obj.profile_pic_url);
+                                                }
+                                                return;
+                                            }
+                                        }
+                                        if (Array.isArray(obj)) {
+                                            for (let item of obj) findUser(item);
+                                        } else {
+                                            for (let k of Object.keys(obj)) findUser(obj[k]);
+                                        }
+                                    }
+                                    findUser(parsed);
+                                } catch (e) {}
+                            }
+
+                            // 2. Regex fallback on script text
+                            if (!scriptBio) {
+                                let m = text.match(/"biography"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+                                if (m && m[1]) {
+                                    try { scriptBio = JSON.parse('"' + m[1] + '"'); } catch (e) { scriptBio = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"'); }
+                                }
+                            }
+                            if (!scriptFullName) {
+                                let m = text.match(/"full_name"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+                                if (m && m[1]) {
+                                    try { scriptFullName = JSON.parse('"' + m[1] + '"'); } catch (e) { scriptFullName = m[1]; }
+                                }
+                            }
+                            if (!scriptFollowing) {
+                                let m = text.match(/"edge_follow"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) || text.match(/"following_count"\s*:\s*(\d+)/);
+                                if (m && m[1]) scriptFollowing = m[1];
+                            }
+                            if (!scriptFollowers) {
+                                let m = text.match(/"edge_followed_by"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) || text.match(/"follower_count"\s*:\s*(\d+)/);
+                                if (m && m[1]) scriptFollowers = m[1];
+                            }
+                            if (!scriptPosts) {
+                                let m = text.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) || text.match(/"media_count"\s*:\s*(\d+)/);
+                                if (m && m[1]) scriptPosts = m[1];
+                            }
+                            if (!scriptPic) {
+                                let m = text.match(/"profile_pic_url_hd"\s*:\s*"((?:[^"\\]|\\.)*)"/) || text.match(/"profile_pic_url"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+                                if (m && m[1]) {
+                                    try { scriptPic = JSON.parse('"' + m[1] + '"'); } catch (e) { scriptPic = m[1]; }
+                                }
+                            }
+
+                            if (scriptBio && scriptFollowing) break;
+                        }
+                    } catch (e) {}
+
+                    return { scriptBio, scriptFullName, scriptFollowers, scriptFollowing, scriptPosts, scriptPic };
+                }
+
+                function extractStatCount(keyword) {
+                    let root = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
+                    if (!root) return '';
+
+                    // 1. Check anchor or list item matching href
+                    let el = root.querySelector('a[href*="/' + keyword + '"], li:has(a[href*="/' + keyword + '"])') ||
+                             document.querySelector('a[href*="/' + keyword + '"]');
+                    if (el) {
+                        let span = el.querySelector('span[title]');
+                        if (span && span.getAttribute('title')) {
+                            let t = span.getAttribute('title').trim();
+                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(t)) return t;
+                        }
+                        let txt = el.innerText || '';
+                        let m = txt.match(/([\d,\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) || 
+                                txt.match(/(?:followers?|following|posts?)\s*([\d,\.]+[KkMmBb]?)/i) ||
+                                txt.match(/^([\d,\.]+[KkMmBb]?)${'$'}/);
+                        if (m) return m[1];
+                    }
+
+                    // 2. Search all elements containing keyword as a word
+                    let regex = new RegExp('\\b' + keyword + '\\b', 'i');
+                    let elements = Array.from(root.querySelectorAll('li, a, div, span, button'))
+                        .filter(e => e.children.length <= 3 && e.innerText && regex.test(e.innerText) && !/edit profile|share profile|message|contact/i.test(e.innerText));
                     
-                    let header = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
-                    let headerText = header ? header.innerText : '';
-                    let sectionText = document.querySelector('main')?.innerText || '';
-                    let fullText = (headerText + '\n' + sectionText).substring(0, 4000);
-                    let bodyText = document.body ? document.body.innerText.substring(0, 2000) : '';
-
-                    // Check for active profile signals:
-                    let corpus = desc + '\n' + fullText;
-                    let hasStats = /[\d,\.]+\s+(followers?|following|posts?)/i.test(corpus);
-                    let hasHandleInTitle = title.toLowerCase().includes('(@' + '$handle'.toLowerCase() + ')');
-                    let hasHandleInDesc = desc.toLowerCase().includes('(@' + '$handle'.toLowerCase() + ')');
-
-                    // True deactivation / missing check:
-                    let isNotFound = !hasStats && !hasHandleInTitle && !hasHandleInDesc && (
-                        title.includes("Page Not Found") ||
-                        title.includes("isn't available") ||
-                        bodyText.includes("Sorry, this page isn't available") ||
-                        bodyText.includes("The link you followed may be broken") ||
-                        bodyText.includes("page may have been removed")
-                    );
-
-                    if (isNotFound) {
-                        window.ScraperBridge.postResult(JSON.stringify({
-                            success: true,
-                            source: 'DEACTIVATED',
-                            isDeactivated: true
-                        }));
-                        return;
-                    }
-
-                    // 1. Live Counters directly from DOM profile card elements (more up-to-date than CDN meta tags)
-                    let domFollowers = '';
-                    let domFollowing = '';
-                    let domPosts = '';
-
-                    let followersEl = document.querySelector('header a[href*="/followers"], a[href*="/followers"]');
-                    if (followersEl) {
-                        let spanWithTitle = followersEl.querySelector('span[title]');
-                        domFollowers = (spanWithTitle ? spanWithTitle.getAttribute('title') : '') || followersEl.innerText || '';
-                    }
-
-                    let followingEl = document.querySelector('header a[href*="/following"], a[href*="/following"]');
-                    if (followingEl) {
-                        let spanWithTitle = followingEl.querySelector('span[title]');
-                        domFollowing = (spanWithTitle ? spanWithTitle.getAttribute('title') : '') || followingEl.innerText || '';
-                    }
-
-                    let postsEl = Array.from(document.querySelectorAll('header ul li, header li, ul li'))
-                        .find(el => el.innerText && /posts?/i.test(el.innerText) && !/followers?|following/i.test(el.innerText));
-                    if (postsEl) {
-                        let spanWithTitle = postsEl.querySelector('span[title]');
-                        domPosts = (spanWithTitle ? spanWithTitle.getAttribute('title') : '') || postsEl.innerText || '';
-                    }
-
-                    // 2. Live Display Name from DOM profile card
-                    let domFullName = '';
-                    if (header) {
-                        let nameEl = header.querySelector('section > div:last-child h1, section > div:last-child span, h1');
-                        if (nameEl && nameEl.innerText && !nameEl.innerText.toLowerCase().includes('$handle'.toLowerCase())) {
-                            domFullName = nameEl.innerText.trim();
+                    for (let e of elements) {
+                        let span = e.querySelector('span[title]');
+                        if (span && span.getAttribute('title')) {
+                            let t = span.getAttribute('title').trim();
+                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(t)) return t;
+                        }
+                        let m = e.innerText.match(/([\d,\.]+[KkMmBb]?)\s*(?:followers?|following|posts?)/i) ||
+                                e.innerText.match(/(?:followers?|following|posts?)\s*([\d,\.]+[KkMmBb]?)/i);
+                        if (m) return m[1];
+                        if (e.previousElementSibling) {
+                            let prevText = (e.previousElementSibling.innerText || '').trim();
+                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(prevText)) return prevText;
+                        }
+                        if (e.nextElementSibling) {
+                            let nextText = (e.nextElementSibling.innerText || '').trim();
+                            if (/^[\d,\.]+[KkMmBb]?${'$'}/.test(nextText)) return nextText;
                         }
                     }
 
-                    // 3. Deeper DOM extraction for user Bio (never present in meta tags)
-                    let domBio = '';
-                    if (header) {
-                        let bioCandidates = Array.from(header.querySelectorAll('div, span, p, h1')).filter(el => {
+                    // 3. Line by line search in root.innerText
+                    let lines = (root.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+                    for (let i = 0; i < lines.length; i++) {
+                        let l = lines[i].toLowerCase();
+                        if (l === keyword || l === keyword + 's' || (keyword === 'followers' && l === 'follower')) {
+                            if (i > 0 && /^[\d,\.]+[KkMmBb]?${'$'}/.test(lines[i - 1])) {
+                                return lines[i - 1];
+                            }
+                            if (i + 1 < lines.length && /^[\d,\.]+[KkMmBb]?${'$'}/.test(lines[i + 1])) {
+                                return lines[i + 1];
+                            }
+                        }
+                        let m = lines[i].match(new RegExp('([\\d,\\.]+[KkMmBb]?)\\s+' + keyword, 'i')) ||
+                                lines[i].match(new RegExp(keyword + '\\s+([\\d,\\.]+[KkMmBb]?)', 'i'));
+                        if (m) return m[1];
+                    }
+
+                    return '';
+                }
+
+                function extractDomFullName(handle) {
+                    let root = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
+                    if (!root) return '';
+
+                    let candidates = Array.from(root.querySelectorAll('h1, h2, span, div'))
+                        .filter(el => {
                             if (el.closest('ul') || el.closest('button') || el.closest('a') || el.closest('nav')) return false;
-                            let text = el.innerText ? el.innerText.trim() : '';
-                            if (!text) return false;
-                            if (text.toLowerCase() === '$handle'.toLowerCase() || text.toLowerCase() === ('@' + '$handle').toLowerCase()) return false;
-                            if (/^(follow|following|edit profile|share profile|message|contact|options)$/i.test(text)) return false;
-                            if (/^[\d,\.]+\s+(followers?|following|posts?)$/i.test(text)) return false;
-                            if (text.includes('followers') && text.includes('following')) return false;
-                            if (domFullName && text === domFullName) return false;
-
+                            let t = (el.innerText || '').trim();
+                            if (!t || t.length > 50 || t.includes('\n')) return false;
+                            let lower = t.toLowerCase();
+                            if (lower === handle.toLowerCase() || lower === '@' + handle.toLowerCase()) return false;
+                            if (/^(follow|following|edit profile|share profile|message|contact|options|posts|followers)$/i.test(lower)) return false;
+                            
                             let style = window.getComputedStyle(el);
-                            let ws = style ? (style.whiteSpace || '') : '';
-                            let isPre = ws.includes('pre') || ws.includes('break');
-                            let isDirAuto = el.getAttribute('dir') === 'auto';
-                            let isBioClass = el.className && typeof el.className === 'string' && (el.className.includes('_ap3a') || el.className.includes('_aa_c'));
-
-                            return isPre || isDirAuto || isBioClass || text.includes('\n');
+                            let fw = style ? (style.fontWeight || '') : '';
+                            let isBold = fw === 'bold' || fw === '600' || fw === '700' || fw === '800';
+                            return isBold || el.tagName === 'H1';
                         });
 
-                        for (let el of bioCandidates) {
-                            let t = el.innerText ? el.innerText.trim() : '';
-                            if (t.length > domBio.length && (!domFullName || t !== domFullName)) {
-                                domBio = t;
+                    for (let c of candidates) {
+                        let t = (c.innerText || '').trim();
+                        if (t && !t.toLowerCase().includes(handle.toLowerCase())) {
+                            return t;
+                        }
+                    }
+                    return '';
+                }
+
+                function extractDomBio(handle, fullName) {
+                    let root = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
+                    if (!root) return '';
+
+                    let bioCandidates = [];
+                    let allElements = Array.from(root.querySelectorAll('div, span, p, h1, section'));
+
+                    for (let el of allElements) {
+                        if (el.children.length > 5) continue;
+                        if (el.closest('ul') || el.closest('button') || el.closest('a') || el.closest('nav') || el.closest('footer')) continue;
+
+                        let text = (el.innerText || '').trim();
+                        if (!text || text.length < 2) continue;
+
+                        if (text.toLowerCase() === handle.toLowerCase() || text.toLowerCase() === ('@' + handle).toLowerCase()) continue;
+                        if (fullName && text.toLowerCase() === fullName.toLowerCase()) continue;
+                        if (/^(follow|following|edit profile|share profile|message|contact|options|threads|similar accounts)$/i.test(text)) continue;
+                        if (/^[\d,\.]+\s+(followers?|following|posts?)${'$'}/i.test(text)) continue;
+                        if (/^(followers?|following|posts?)${'$'}/i.test(text)) continue;
+                        if (text.includes('followers') && text.includes('following')) continue;
+                        if (text.includes('See Instagram photos and videos') || text.includes('More posts from') || text.includes('About Help Press API Jobs')) continue;
+
+                        let style = window.getComputedStyle(el);
+                        let ws = style ? (style.whiteSpace || '') : '';
+                        let isPre = ws.includes('pre') || ws.includes('break');
+                        let isDirAuto = el.getAttribute('dir') === 'auto';
+                        let isBioClass = el.className && typeof el.className === 'string' && 
+                                         (el.className.includes('_ap3a') || el.className.includes('_aa_c') || el.className.includes('_aaco') || el.className.includes('_aacl'));
+
+                        if (isPre || isDirAuto || isBioClass || text.includes('\n')) {
+                            bioCandidates.push({
+                                text: text,
+                                score: (isPre ? 3 : 0) + (isDirAuto ? 2 : 0) + (isBioClass ? 3 : 0) + (text.includes('\n') ? 2 : 0) + Math.min(text.length / 10, 5)
+                            });
+                        }
+                    }
+
+                    if (bioCandidates.length > 0) {
+                        bioCandidates.sort((a, b) => b.score - a.score);
+                        return bioCandidates[0].text;
+                    }
+
+                    // Method B: Parse text lines after stats
+                    let headerText = root.innerText || '';
+                    if (headerText) {
+                        let lines = headerText.split('\n').map(l => l.trim()).filter(Boolean);
+                        let lastStatIdx = -1;
+                        for (let i = 0; i < lines.length; i++) {
+                            let l = lines[i].toLowerCase();
+                            if (l === 'followers' || l === 'follower' || l === 'following' || l.endsWith(' followers') || l.endsWith(' following')) {
+                                lastStatIdx = i;
+                            }
+                        }
+
+                        if (lastStatIdx !== -1 && lastStatIdx + 1 < lines.length) {
+                            let bioLines = [];
+                            let stopKeywords = ['posts', 'reels', 'tagged', 'see instagram', 'more posts from', 'about', 'help', 'threads.net', 'threads'];
+                            let actionButtons = ['follow', 'following', 'message', 'edit profile', 'share profile', 'contact', 'options'];
+
+                            for (let i = lastStatIdx + 1; i < lines.length; i++) {
+                                let line = lines[i];
+                                let lower = line.toLowerCase();
+
+                                if (stopKeywords.some(sk => lower === sk || lower.startsWith(sk))) break;
+                                if (actionButtons.includes(lower)) continue;
+                                if (lower === handle.toLowerCase() || lower === '@' + handle.toLowerCase()) continue;
+                                if (fullName && lower === fullName.toLowerCase()) continue;
+                                if (/^[\d,\.]+\s+(followers?|following|posts?)${'$'}/i.test(lower)) continue;
+
+                                bioLines.push(line);
+                            }
+                            if (bioLines.length > 0) {
+                                return bioLines.join('\n');
                             }
                         }
                     }
 
-                    // 4. Official user biography and full_name from embedded JSON script tags
-                    let scriptBio = '';
-                    let scriptFullName = '';
-                    try {
-                        let scriptTags = document.querySelectorAll('script[type="application/json"]');
-                        for (let s of scriptTags) {
-                            let text = s.innerText || s.textContent || '';
-                            if (!text.includes('biography')) continue;
-                            try {
-                                let parsed = JSON.parse(text);
-                                function findUserInObj(obj) {
-                                    if (!obj || typeof obj !== 'object') return;
-                                    if ('biography' in obj && 'username' in obj) {
-                                        if (String(obj.username).toLowerCase() === '$handle'.toLowerCase()) {
-                                            scriptBio = obj.biography || '';
-                                            scriptFullName = obj.full_name || '';
-                                            return;
-                                        }
-                                    }
-                                    for (let k of Object.keys(obj)) {
-                                        if (!scriptBio && !scriptFullName) {
-                                            findUserInObj(obj[k]);
-                                        }
-                                    }
-                                }
-                                findUserInObj(parsed);
-                                if (scriptBio || scriptFullName) break;
-                            } catch (e) {}
-                        }
-                    } catch (e) {}
+                    return '';
+                }
 
-                    window.ScraperBridge.postResult(JSON.stringify({
-                        success: true,
-                        source: 'DOM',
-                        desc: desc,
-                        title: title,
-                        img: img,
-                        domFollowers: domFollowers,
-                        domFollowing: domFollowing,
-                        domPosts: domPosts,
-                        domFullName: domFullName,
-                        domBio: domBio,
-                        scriptBio: scriptBio,
-                        scriptFullName: scriptFullName,
-                        headerText: headerText,
-                        fullText: fullText
-                    }));
-                } catch (err) {
-                    window.ScraperBridge.postResult(JSON.stringify({
-                        success: false,
-                        error: err.toString()
-                    }));
+                function checkPage() {
+                    try {
+                        let elapsed = Date.now() - startTime;
+                        let title = document.querySelector('meta[property="og:title"]')?.content || document.title || '';
+                        let desc = document.querySelector('meta[property="og:description"]')?.content || 
+                                   document.querySelector('meta[name="description"]')?.content || '';
+                        let img = document.querySelector('meta[property="og:image"]')?.content || '';
+                        let header = document.querySelector('header') || document.querySelector('main section') || document.querySelector('main');
+                        let headerText = header ? (header.innerText || '') : '';
+                        let mainText = document.querySelector('main')?.innerText || '';
+                        let fullText = (headerText + '\n' + mainText).substring(0, 5000);
+                        let bodyText = document.body ? document.body.innerText.substring(0, 2000) : '';
+
+                        // 1. True deactivation / missing check:
+                        let isNotFoundMarker = title.includes("Page Not Found") ||
+                                               title.includes("isn't available") ||
+                                               bodyText.includes("Sorry, this page isn't available") ||
+                                               bodyText.includes("The link you followed may be broken") ||
+                                               bodyText.includes("page may have been removed");
+
+                        let hasLiveStatsInHeader = /followers?/i.test(headerText) && /following/i.test(headerText);
+
+                        if (isNotFoundMarker && !hasLiveStatsInHeader && elapsed >= 2000) {
+                            postResult({
+                                success: true,
+                                source: 'DEACTIVATED',
+                                isDeactivated: true
+                            });
+                            return;
+                        }
+
+                        // 2. Extract JSON script payload
+                        let scriptData = extractScriptData(cleanHandle);
+
+                        // 3. Extract DOM metrics & text
+                        let domFollowing = extractStatCount('following');
+                        let domFollowers = extractStatCount('followers') || extractStatCount('follower');
+                        let domPosts = extractStatCount('posts') || extractStatCount('post');
+                        let domFullName = extractDomFullName(cleanHandle);
+                        let domBio = extractDomBio(cleanHandle, domFullName);
+
+                        // 4. Check if React has hydrated the profile
+                        let hasHydrated = (domFollowing && domFollowers) || 
+                                          (scriptData.scriptFollowing && scriptData.scriptFollowers) ||
+                                          (hasLiveStatsInHeader && (domFollowing || scriptData.scriptFollowing));
+
+                        if (hasHydrated || elapsed >= maxWaitMs) {
+                            postResult({
+                                success: true,
+                                source: 'DOM',
+                                isLiveHydrated: !!hasHydrated,
+                                desc: desc,
+                                title: title,
+                                img: (scriptData.scriptPic || img),
+                                domFollowers: domFollowers,
+                                domFollowing: domFollowing,
+                                domPosts: domPosts,
+                                domFullName: domFullName,
+                                domBio: domBio,
+                                scriptBio: scriptData.scriptBio,
+                                scriptFullName: scriptData.scriptFullName,
+                                scriptFollowers: scriptData.scriptFollowers,
+                                scriptFollowing: scriptData.scriptFollowing,
+                                scriptPosts: scriptData.scriptPosts,
+                                headerText: headerText,
+                                fullText: fullText
+                            });
+                        }
+                    } catch (err) {
+                        if (Date.now() - startTime >= maxWaitMs) {
+                            postResult({
+                                success: false,
+                                error: err.toString()
+                            });
+                        }
+                    }
+                }
+
+                if (window._scraperPollTimer) {
+                    clearInterval(window._scraperPollTimer);
+                }
+                checkPage();
+                if (!hasPosted) {
+                    window._scraperPollTimer = setInterval(checkPage, pollIntervalMs);
                 }
             })();
         """.trimIndent()
 
-        Log.i(TAG, "[WebViewScraper] Injecting scraper script into page...")
+        Log.i(TAG, "[WebViewScraper] Injecting active polling scraper script into page...")
         webView.evaluateJavascript(script, null)
     }
 
@@ -341,41 +551,58 @@ class HeadlessWebViewScraper(private val context: Context) {
                 )
             }
 
-            // Fallback to DOM/Text parsing
+            // DOM & JSON State Parsing
             val desc = root.optString("desc")
             val title = root.optString("title")
             val img = root.optString("img")
+            val isLiveHydrated = root.optBoolean("isLiveHydrated", false)
+
+            val scriptFollowing = root.optString("scriptFollowing").trim()
+            val scriptFollowers = root.optString("scriptFollowers").trim()
+            val scriptPosts = root.optString("scriptPosts").trim()
+            val scriptBio = root.optString("scriptBio").trim()
+            val scriptFullName = root.optString("scriptFullName").trim()
+
             val domFollowersRaw = root.optString("domFollowers").trim()
             val domFollowingRaw = root.optString("domFollowing").trim()
             val domPostsRaw = root.optString("domPosts").trim()
             val domFullName = root.optString("domFullName").trim()
             val domBio = root.optString("domBio").trim()
-            val scriptBio = root.optString("scriptBio").trim()
-            val scriptFullName = root.optString("scriptFullName").trim()
             val headerText = root.optString("headerText")
             val fullText = root.optString("fullText")
 
-            Log.i(TAG, "[WebViewScraper] Parsing DOM Profile Card: domF='$domFollowersRaw', domIng='$domFollowingRaw', domP='$domPostsRaw', domName='$domFullName', domBio='$domBio'")
+            Log.i(TAG, "[WebViewScraper] Parsing DOM Profile Card (hydrated=$isLiveHydrated): domF='$domFollowersRaw', domIng='$domFollowingRaw', scriptF='$scriptFollowers', scriptIng='$scriptFollowing', domBio='$domBio', scriptBio='$scriptBio'")
 
             var followers = 0L
             var following = 0L
             var posts = 0L
 
-            // 1. Live Counters: Priority 1 = Direct DOM card elements (most up-to-date)
-            if (domFollowersRaw.isNotBlank()) {
+            // 1. Raw numbers from embedded JSON script state (highest fidelity live data)
+            if (scriptFollowers.isNotBlank()) {
+                followers = scriptFollowers.toLongOrNull() ?: InstagramScraper.parseFormattedCount(scriptFollowers)
+            }
+            if (scriptFollowing.isNotBlank()) {
+                following = scriptFollowing.toLongOrNull() ?: InstagramScraper.parseFormattedCount(scriptFollowing)
+            }
+            if (scriptPosts.isNotBlank()) {
+                posts = scriptPosts.toLongOrNull() ?: InstagramScraper.parseFormattedCount(scriptPosts)
+            }
+
+            // 2. Live Counters directly from DOM profile card elements
+            if (followers == 0L && domFollowersRaw.isNotBlank()) {
                 val m = Pattern.compile("([\\d,\\.KkMmBb]+)").matcher(domFollowersRaw)
                 if (m.find()) followers = InstagramScraper.parseFormattedCount(m.group(1))
             }
-            if (domFollowingRaw.isNotBlank()) {
+            if (following == 0L && domFollowingRaw.isNotBlank()) {
                 val m = Pattern.compile("([\\d,\\.KkMmBb]+)").matcher(domFollowingRaw)
                 if (m.find()) following = InstagramScraper.parseFormattedCount(m.group(1))
             }
-            if (domPostsRaw.isNotBlank()) {
+            if (posts == 0L && domPostsRaw.isNotBlank()) {
                 val m = Pattern.compile("([\\d,\\.KkMmBb]+)").matcher(domPostsRaw)
                 if (m.find()) posts = InstagramScraper.parseFormattedCount(m.group(1))
             }
 
-            // Priority 2 = Parsed from rendered DOM headerText
+            // 3. Parsed from rendered DOM headerText
             if (followers == 0L && headerText.isNotBlank()) {
                 val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+follower", Pattern.CASE_INSENSITIVE).matcher(headerText)
                 if (m.find()) followers = InstagramScraper.parseFormattedCount(m.group(1))
@@ -389,18 +616,20 @@ class HeadlessWebViewScraper(private val context: Context) {
                 if (m.find()) posts = InstagramScraper.parseFormattedCount(m.group(1))
             }
 
-            // Priority 3 = Fallback to meta description ONLY if live DOM exposed no counters
-            if (followers == 0L && desc.isNotBlank()) {
-                val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+follower", Pattern.CASE_INSENSITIVE).matcher(desc)
-                if (m.find()) followers = InstagramScraper.parseFormattedCount(m.group(1))
-            }
-            if (following == 0L && desc.isNotBlank()) {
-                val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+following", Pattern.CASE_INSENSITIVE).matcher(desc)
-                if (m.find()) following = InstagramScraper.parseFormattedCount(m.group(1))
-            }
-            if (posts == 0L && desc.isNotBlank()) {
-                val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+post", Pattern.CASE_INSENSITIVE).matcher(desc)
-                if (m.find()) posts = InstagramScraper.parseFormattedCount(m.group(1))
+            // 4. Fallback to CDN meta description ONLY if live DOM was NOT hydrated
+            if (!isLiveHydrated) {
+                if (followers == 0L && desc.isNotBlank()) {
+                    val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+follower", Pattern.CASE_INSENSITIVE).matcher(desc)
+                    if (m.find()) followers = InstagramScraper.parseFormattedCount(m.group(1))
+                }
+                if (following == 0L && desc.isNotBlank()) {
+                    val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+following", Pattern.CASE_INSENSITIVE).matcher(desc)
+                    if (m.find()) following = InstagramScraper.parseFormattedCount(m.group(1))
+                }
+                if (posts == 0L && desc.isNotBlank()) {
+                    val m = Pattern.compile("([\\d,\\.KkMmBb]+)\\s+post", Pattern.CASE_INSENSITIVE).matcher(desc)
+                    if (m.find()) posts = InstagramScraper.parseFormattedCount(m.group(1))
+                }
             }
 
             Log.i(TAG, "[WebViewScraper] Resolved Live Counts: Followers=$followers, Following=$following, Posts=$posts")
@@ -409,7 +638,7 @@ class HeadlessWebViewScraper(private val context: Context) {
             val hasHandleInDesc = desc.contains("(@$handle", ignoreCase = true)
             val hasValidStats = followers > 0L || following > 0L || posts > 0L
 
-            // Only consider account deactivated if there are NO valid stats and NO handle confirmation in title/desc
+            // Deactivation check: only if no stats and error page markers match
             if (!hasValidStats && !hasHandleInTitle && !hasHandleInDesc) {
                 if (title.contains("Page Not Found", ignoreCase = true) ||
                     title.contains("isn't available", ignoreCase = true) ||
@@ -423,11 +652,11 @@ class HeadlessWebViewScraper(private val context: Context) {
                 }
             }
 
-            // 2. Extract Full Name: Prioritize live DOM card -> script state -> title
-            var fullName = if (domFullName.isNotBlank() && !domFullName.equals(handle, ignoreCase = true)) {
-                domFullName
-            } else if (scriptFullName.isNotBlank() && !scriptFullName.equals(handle, ignoreCase = true)) {
+            // Extract Full Name: Prioritize JSON script state -> live DOM card -> title/desc
+            var fullName = if (scriptFullName.isNotBlank() && !scriptFullName.equals(handle, ignoreCase = true)) {
                 scriptFullName
+            } else if (domFullName.isNotBlank() && !domFullName.equals(handle, ignoreCase = true)) {
+                domFullName
             } else {
                 ""
             }
@@ -447,14 +676,18 @@ class HeadlessWebViewScraper(private val context: Context) {
                     }
                 }
             }
+            if (fullName.isBlank()) {
+                fullName = handle
+            }
 
-            // 3. Extract Bio: Read deeper DOM elements from profile card (never from meta tags)
-            var bio = if (domBio.isNotBlank()) domBio else scriptBio
+            // Extract Bio: Prioritize script JSON biography -> live DOM card element
+            var bio = if (scriptBio.isNotBlank()) scriptBio else domBio
+
+            // Fallback for bio from text lines if DOM element search didn't pick it up
             if (bio.isBlank()) {
                 val domText = if (headerText.isNotBlank()) headerText else fullText
                 if (domText.isNotBlank()) {
                     val lines = domText.split("\n").map { it.trim() }.filter { it.isNotBlank() }
-                    // Match followers/following specifically to avoid matching the POSTS tab bar
                     var lastStatIndex = -1
                     for (i in lines.indices) {
                         val l = lines[i].lowercase()
@@ -477,7 +710,6 @@ class HeadlessWebViewScraper(private val context: Context) {
 
                         for (line in afterStats) {
                             val lower = line.lowercase()
-                            // Stop immediately upon hitting the photo grid tab bar or footer
                             if (stopKeywords.contains(lower) ||
                                 lower.startsWith("see instagram") ||
                                 lower.startsWith("more posts from") ||
@@ -486,23 +718,9 @@ class HeadlessWebViewScraper(private val context: Context) {
                             ) {
                                 break
                             }
-                            // Skip action buttons
-                            if (actionButtons.contains(lower)) {
-                                continue
-                            }
-                            // Skip handle if repeated
-                            if (lower == handle.lowercase() || lower == "@${handle.lowercase()}") {
-                                continue
-                            }
-                            // Skip display name if it matches fullName
-                            if (fullName.isNotBlank() && line == fullName) {
-                                continue
-                            }
-                            // If fullName is still blank, first candidate line is display name
-                            if (fullName.isBlank() && bioLines.isEmpty()) {
-                                fullName = line
-                                continue
-                            }
+                            if (actionButtons.contains(lower)) continue
+                            if (lower == handle.lowercase() || lower == "@${handle.lowercase()}") continue
+                            if (line == fullName) continue
 
                             bioLines.add(line)
                         }
@@ -512,11 +730,6 @@ class HeadlessWebViewScraper(private val context: Context) {
                         }
                     }
                 }
-            }
-
-            // Fallback for fullName if none discovered
-            if (fullName.isBlank()) {
-                fullName = handle
             }
 
             // Remove leading display name from bio if duplicated
@@ -532,9 +745,8 @@ class HeadlessWebViewScraper(private val context: Context) {
                 bio = ""
             }
 
-            Log.i(TAG, "[WebViewScraper] Final parsed profile: name='$fullName', bio='$bio'")
+            Log.i(TAG, "[WebViewScraper] Final parsed profile: name='$fullName', bio='$bio', following=$following, followers=$followers")
 
-            // If account has zero counts, no header, and no profile info -> likely deactivated
             if (followers == 0L && following == 0L && posts == 0L && headerText.isBlank() && !desc.contains("from ")) {
                 Log.w(TAG, "[WebViewScraper] Zero stats and missing header -> @$handle is Deactivated")
                 return ProfileResult.DeactivatedOrNotFound(handle)
