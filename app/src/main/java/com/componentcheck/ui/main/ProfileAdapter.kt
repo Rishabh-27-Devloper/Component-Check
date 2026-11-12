@@ -62,12 +62,7 @@ class ProfileAdapter(
 
             // Bio (formatted exactly as on web, suppressing Instagram boilerplate)
             val cleanBio = item.bio.trim()
-            val isBoilerplate = cleanBio.contains("See Instagram photos and videos", ignoreCase = true) ||
-                    cleanBio.contains("Follow to see their photos and videos", ignoreCase = true) ||
-                    cleanBio.contains("Follow this account to see", ignoreCase = true) ||
-                    cleanBio.contains("This account is private", ignoreCase = true) ||
-                    cleanBio.matches(Regex("(?i)^[\\d,\\.KkMmBb]+\\s+Followers?,\\s+[\\d,\\.KkMmBb]+\\s+Following.*")) ||
-                    cleanBio.startsWith("Monitoring active for")
+            val isBoilerplate = com.componentcheck.data.repository.ProfileRepository.isBoilerplateBio(cleanBio)
 
             if (cleanBio.isNotBlank() && !isBoilerplate) {
                 binding.tvBio.visibility = View.VISIBLE

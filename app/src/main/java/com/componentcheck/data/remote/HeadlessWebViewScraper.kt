@@ -435,10 +435,16 @@ class HeadlessWebViewScraper(private val context: Context) {
                         'this account is private',
                         'see instagram photos and videos',
                         'see instagram photos',
+                        'suggested for you',
+                        'suggested',
+                        'similar accounts',
+                        'discover people',
                         'more posts from',
                         'no posts yet',
                         'when they share',
                         'already follow',
+                        'open in app',
+                        'use the app',
                         'about help press api jobs',
                         'privacy terms',
                         'threads'
@@ -456,7 +462,7 @@ class HeadlessWebViewScraper(private val context: Context) {
                         let lower = text.toLowerCase();
                         if (lower === targetHandle.toLowerCase() || lower === '@' + targetHandle.toLowerCase()) continue;
                         if (fullName && lower === fullName.toLowerCase()) continue;
-                        if (/^(follow|following|edit profile|share profile|message|contact|options|threads|similar accounts)$/i.test(text)) continue;
+                        if (/^(follow|following|edit profile|share profile|message|contact|options|threads|similar accounts|suggested for you|suggested|discover people)$/i.test(text)) continue;
                         if (/^[0-9,\\.]+\s+(followers?|following|posts?)${'$'}/i.test(text)) continue;
                         if (/^(followers?|following|posts?)${'$'}/i.test(text)) continue;
                         if (text.includes('followers') && text.includes('following')) continue;
@@ -500,7 +506,9 @@ class HeadlessWebViewScraper(private val context: Context) {
                             let bioLines = [];
                             let stopKeywords = [
                                 'posts', 'reels', 'tagged', 'see instagram', 'more posts from',
-                                'this account is private', 'follow to see', 'about', 'help', 'threads.net', 'threads'
+                                'this account is private', 'follow to see', 'suggested for you', 'suggested',
+                                'similar accounts', 'discover people', 'open in app', 'use the app',
+                                'about', 'help', 'threads.net', 'threads'
                             ];
                             let actionButtons = ['follow', 'following', 'message', 'edit profile', 'share profile', 'contact', 'options'];
 
@@ -863,14 +871,22 @@ class HeadlessWebViewScraper(private val context: Context) {
             // Comprehensive cleanup: Disallow standard Instagram boilerplate from being treated as a bio
             val boilerplatePhrases = listOf(
                 "See Instagram photos and videos",
+                "See Instagram photos",
                 "Follow to see their photos and videos",
                 "Follow this account to see",
                 "This account is private",
                 "This Account is Private",
+                "Suggested for you",
+                "Suggested",
+                "Similar accounts",
+                "Discover people",
                 "Monitoring active for",
                 "No posts yet",
                 "When they share photos",
-                "Already follow"
+                "Already follow",
+                "Open in app",
+                "Use the app",
+                "More posts from"
             )
             for (phrase in boilerplatePhrases) {
                 if (bio.contains(phrase, ignoreCase = true)) {

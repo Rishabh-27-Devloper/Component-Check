@@ -238,16 +238,12 @@ class ProfileRepository(
             }
         }
 
-        // Check Bio (ignore if prev was placeholder boilerplate)
-        val prevBioIsBoilerplate = prev.bio.contains("See Instagram photos and videos", ignoreCase = true) ||
-                prev.bio.contains("Follow to see their photos and videos", ignoreCase = true) ||
-                prev.bio.contains("Follow this account to see", ignoreCase = true) ||
-                prev.bio.contains("This account is private", ignoreCase = true) ||
-                prev.bio.startsWith("Monitoring active for") ||
-                prev.bio.contains("Followers, ") ||
-                prev.bio.isBlank()
+        // Check Bio: strictly avoid boilerplate or placeholder text
+        val prevBioIsBoilerplate = isBoilerplateBio(prev.bio)
+        val freshBioIsBoilerplate = isBoilerplateBio(fresh.bio)
 
-        if (fresh.bio.isNotBlank() && fresh.bio != prev.bio) {
+        if (!freshBioIsBoilerplate && fresh.bio != prev.bio) {
+            // Only alert if previous bio was a real bio (not initial blank/placeholder)
             if (!prevBioIsBoilerplate) {
                 changes.add(
                     ChangeHistoryEntity(
@@ -299,9 +295,15 @@ class ProfileRepository(
         }
 
         // Update profile in DB with latest stats and preserve previous values for UI deltas
+        val resolvedBio = when {
+            !freshBioIsBoilerplate -> fresh.bio
+            !prevBioIsBoilerplate -> prev.bio
+            else -> ""
+        }
+
         val updatedProfile = prev.copy(
             fullName = if (fresh.fullName.isNotBlank()) fresh.fullName else prev.fullName,
-            bio = if (fresh.bio.isNotBlank()) fresh.bio else if (prev.bio.startsWith("Monitoring active") || prev.bio.contains("See Instagram photos")) "" else prev.bio,
+            bio = resolvedBio,
             followerCount = fresh.followerCount,
             followingCount = fresh.followingCount,
             postCount = fresh.postCount,
@@ -375,6 +377,32 @@ class ProfileRepository(
     companion object {
         @Volatile
         private var INSTANCE: ProfileRepository? = null
+
+        fun isBoilerplateBio(bioText: String): Boolean {
+            if (bioText.isBlank()) return true
+            val lower = bioText.trim().lowercase()
+            val boilerplatePatterns = listOf(
+                "see instagram photos and videos",
+                "see instagram photos",
+                "follow to see their photos and videos",
+                "follow this account to see",
+                "this account is private",
+                "suggested for you",
+                "suggested",
+                "similar accounts",
+                "discover people",
+                "monitoring active for",
+                "no posts yet",
+                "when they share photos",
+                "already follow",
+                "open in app",
+                "use the app",
+                "more posts from"
+            )
+            if (boilerplatePatterns.any { lower.contains(it) }) return true
+            if (lower.startsWith("followers, ") || lower.contains(" followers, ")) return true
+            return false
+        }
 
         fun getInstance(context: Context): ProfileRepository {
             return INSTANCE ?: synchronized(this) {
